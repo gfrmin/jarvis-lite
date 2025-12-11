@@ -10,6 +10,7 @@ A simple, single-user GTD bot using:
 """
 
 import os
+import re
 import json
 import logging
 from datetime import datetime, date, timedelta
@@ -60,25 +61,30 @@ def init_db():
                     text TEXT NOT NULL,
                     list VARCHAR(20) NOT NULL DEFAULT 'inbox',
                     due_date DATE,
+                    is_today BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     completed_at TIMESTAMP
                 )
+            """)
+            # Add is_today column if it doesn't exist (for existing databases)
+            cur.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_today BOOLEAN DEFAULT FALSE
             """)
             conn.commit()
     logger.info("Database initialized")
 
 
-def add_task(user_id: int, text: str, list_name: str = "inbox", due_date: date = None) -> dict:
+def add_task(user_id: int, text: str, list_name: str = "inbox", due_date: date = None, is_today: bool = False) -> dict:
     """Add a new task and return it."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO tasks (user_id, text, list, due_date)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id, text, list, due_date
+                INSERT INTO tasks (user_id, text, list, due_date, is_today)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id, text, list, due_date, is_today
                 """,
-                (user_id, text, list_name, due_date)
+                (user_id, text, list_name, due_date, is_today)
             )
             task = cur.fetchone()
             conn.commit()
@@ -92,7 +98,7 @@ def complete_task(user_id: int, task_id: int = None, text_match: str = None) -> 
             if task_id:
                 cur.execute(
                     """
-                    UPDATE tasks SET completed_at = NOW()
+                    UPDATE tasks SET completed_at = NOW(), is_today = FALSE
                     WHERE id = %s AND user_id = %s AND completed_at IS NULL
                     RETURNING id, text, list
                     """,
@@ -101,7 +107,7 @@ def complete_task(user_id: int, task_id: int = None, text_match: str = None) -> 
             else:
                 cur.execute(
                     """
-                    UPDATE tasks SET completed_at = NOW()
+                    UPDATE tasks SET completed_at = NOW(), is_today = FALSE
                     WHERE user_id = %s AND completed_at IS NULL
                       AND LOWER(text) LIKE LOWER(%s)
                     RETURNING id, text, list
@@ -130,21 +136,65 @@ def delete_task(user_id: int, task_id: int) -> dict | None:
             return task
 
 
-def move_task(user_id: int, task_id: int, new_list: str) -> dict | None:
+def move_task(user_id: int, task_id: int, new_list: str, due_date: date = None) -> dict | None:
     """Move a task to a different list. Returns the task if found."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if due_date:
+                cur.execute(
+                    """
+                    UPDATE tasks SET list = %s, due_date = %s
+                    WHERE id = %s AND user_id = %s AND completed_at IS NULL
+                    RETURNING id, text, list, due_date
+                    """,
+                    (new_list, due_date, task_id, user_id)
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE tasks SET list = %s
+                    WHERE id = %s AND user_id = %s AND completed_at IS NULL
+                    RETURNING id, text, list, due_date
+                    """,
+                    (new_list, task_id, user_id)
+                )
+            task = cur.fetchone()
+            conn.commit()
+            return task
+
+
+def mark_today(user_id: int, task_id: int, is_today: bool = True) -> dict | None:
+    """Mark or unmark a task for today. Returns the task if found."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE tasks SET list = %s
+                UPDATE tasks SET is_today = %s
                 WHERE id = %s AND user_id = %s AND completed_at IS NULL
-                RETURNING id, text, list
+                RETURNING id, text, list, is_today
                 """,
-                (new_list, task_id, user_id)
+                (is_today, task_id, user_id)
             )
             task = cur.fetchone()
             conn.commit()
             return task
+
+
+def clear_today(user_id: int) -> int:
+    """Clear all today flags. Returns count of cleared tasks."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE tasks SET is_today = FALSE
+                WHERE user_id = %s AND is_today = TRUE AND completed_at IS NULL
+                RETURNING id
+                """,
+                (user_id,)
+            )
+            count = cur.rowcount
+            conn.commit()
+            return count
 
 
 def get_tasks(user_id: int, list_name: str = None, include_completed: bool = False) -> list:
@@ -173,6 +223,36 @@ def get_tasks(user_id: int, list_name: str = None, include_completed: bool = Fal
                         "SELECT * FROM tasks WHERE user_id = %s AND completed_at IS NULL ORDER BY list, id",
                         (user_id,)
                     )
+            return cur.fetchall()
+
+
+def get_today_tasks(user_id: int) -> list:
+    """Get tasks marked for today."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM tasks
+                WHERE user_id = %s AND is_today = TRUE AND completed_at IS NULL
+                ORDER BY list, id
+                """,
+                (user_id,)
+            )
+            return cur.fetchall()
+
+
+def get_tasks_by_tag(user_id: int, tag: str) -> list:
+    """Get tasks containing a specific @tag."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM tasks
+                WHERE user_id = %s AND completed_at IS NULL AND text ILIKE %s
+                ORDER BY list, id
+                """,
+                (user_id, f"%@{tag}%")
+            )
             return cur.fetchall()
 
 
@@ -225,6 +305,12 @@ def get_task_counts(user_id: int) -> dict:
             # Ensure all lists are represented
             for lst in VALID_LISTS:
                 counts.setdefault(lst, 0)
+            # Get today count
+            cur.execute(
+                "SELECT COUNT(*) as count FROM tasks WHERE user_id = %s AND is_today = TRUE AND completed_at IS NULL",
+                (user_id,)
+            )
+            counts["today"] = cur.fetchone()["count"]
             return counts
 
 
@@ -253,58 +339,77 @@ def parse_with_haiku(user_message: str) -> dict:
     Use Claude Haiku to parse natural language into a structured action.
 
     Returns a dict with:
-    - action: add | complete | delete | move | show | review | help | unknown
+    - action: add | complete | delete | move | show | review | today | clear_today | process | help | unknown
     - text: task text (for add)
     - list: target list (inbox, next, scheduled, someday)
-    - task_id: task ID (for complete, delete, move)
+    - task_id: task ID (for complete, delete, move, today)
     - due_date: ISO date string (for scheduled tasks)
+    - tag: context tag for filtering (e.g., "work", "home")
     """
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    today = date.today().isoformat()
+    today_date = date.today().isoformat()
 
     system_prompt = f"""You are a GTD task parser. Parse the user's message into a JSON action.
 
-Today's date is {today}.
+Today's date is {today_date}.
 
 Actions:
-- add: Add a new task. Extract the task text and determine the list.
+- add: Add a new task. Extract the task text (keep @tags in the text) and determine the list.
 - complete: Mark a task as done. Look for "done", "finished", "complete", etc.
 - delete: Remove a task. Look for "delete", "remove", etc.
-- move: Move a task to a different list. Look for "move X to Y".
-- show: Display tasks. Look for "show", "list", "what's next", etc.
+- move: Move a task to a different list. Look for "move X to Y", "X to next", "X scheduled tomorrow".
+- show: Display tasks. Look for "show", "list", "what's next", etc. Can filter by @tag.
 - review: Weekly review. Look for "review", "weekly review", etc.
+- today: Mark a task for today's focus. Look for "today X", "focus X", "star X".
+- clear_today: Clear all today markers. Look for "clear today", "reset today".
+- process: Start inbox processing. Look for "process", "process inbox", "triage".
 - help: User needs help.
 
 Lists:
 - inbox: Default for new tasks without a specific list
-- next: Tasks to do soon. Look for "#next", "next:", or context implying urgency
+- next: Tasks to do within 7 days. Look for "#next", "next:", or context implying urgency
 - scheduled: Tasks with a due date. Parse dates like "tomorrow", "next monday", "Dec 15", etc.
 - someday: Future/maybe tasks. Look for "someday", "maybe", "later", etc.
 
+Context tags (@work, @home, @errands, etc.) should be kept in the task text as-is.
+
 Respond with ONLY valid JSON, no other text:
 {{
-  "action": "add|complete|delete|move|show|review|help|unknown",
-  "text": "task text if adding",
-  "list": "inbox|next|scheduled|someday",
+  "action": "add|complete|delete|move|show|review|today|clear_today|process|help|unknown",
+  "text": "task text if adding (include @tags)",
+  "list": "inbox|next|scheduled|someday|today|null",
   "task_id": null or number,
   "due_date": null or "YYYY-MM-DD",
-  "text_match": "partial text to match for completion"
+  "text_match": "partial text to match for completion",
+  "tag": "tag name without @ for filtering"
 }}
 
 Examples:
 - "Buy milk" -> {{"action": "add", "text": "Buy milk", "list": "inbox"}}
-- "Call bank tomorrow" -> {{"action": "add", "text": "Call bank", "list": "scheduled", "due_date": "2024-01-16"}}
-- "#next: finish report" -> {{"action": "add", "text": "finish report", "list": "next"}}
+- "Buy milk @errands" -> {{"action": "add", "text": "Buy milk @errands", "list": "inbox"}}
+- "Call bank tomorrow" -> {{"action": "add", "text": "Call bank", "list": "scheduled", "due_date": "{today_date}"}}
+- "#next: finish report @work" -> {{"action": "add", "text": "finish report @work", "list": "next"}}
 - "someday: learn guitar" -> {{"action": "add", "text": "learn guitar", "list": "someday"}}
 - "Done: buy milk" -> {{"action": "complete", "text_match": "buy milk"}}
 - "Done 3" -> {{"action": "complete", "task_id": 3}}
 - "Delete 5" -> {{"action": "delete", "task_id": 5}}
 - "Move 3 to next" -> {{"action": "move", "task_id": 3, "list": "next"}}
+- "3 to next" -> {{"action": "move", "task_id": 3, "list": "next"}}
+- "3 to scheduled tomorrow" -> {{"action": "move", "task_id": 3, "list": "scheduled", "due_date": "..."}}
+- "3 someday" -> {{"action": "move", "task_id": 3, "list": "someday"}}
 - "What's next?" -> {{"action": "show", "list": "next"}}
 - "Show inbox" -> {{"action": "show", "list": "inbox"}}
+- "Show today" -> {{"action": "show", "list": "today"}}
+- "Show @work" -> {{"action": "show", "tag": "work"}}
 - "Show all" -> {{"action": "show", "list": null}}
-- "Weekly review" -> {{"action": "review"}}"""
+- "Weekly review" -> {{"action": "review"}}
+- "Today 5" -> {{"action": "today", "task_id": 5}}
+- "Focus 3" -> {{"action": "today", "task_id": 3}}
+- "Star 7" -> {{"action": "today", "task_id": 7}}
+- "Clear today" -> {{"action": "clear_today"}}
+- "Process inbox" -> {{"action": "process"}}
+- "Process" -> {{"action": "process"}}"""
 
     response = client.messages.create(
         model="claude-haiku-4-20250414",
@@ -333,11 +438,15 @@ Examples:
 
 def format_task(task: dict, show_list: bool = False) -> str:
     """Format a single task for display."""
-    parts = [f"[{task['id']}] {task['text']}"]
+    star = "★ " if task.get("is_today") else ""
+    parts = [f"{star}[{task['id']}] {task['text']}"]
     if show_list:
         parts.append(f"#{task['list']}")
     if task.get("due_date"):
-        parts.append(f"(due: {task['due_date']})")
+        due = task["due_date"]
+        if isinstance(due, date):
+            due = due.isoformat()
+        parts.append(f"(due: {due})")
     return " ".join(parts)
 
 
@@ -350,6 +459,11 @@ def format_task_list(tasks: list, title: str, show_list: bool = False) -> str:
     for task in tasks:
         lines.append(f"  {format_task(task, show_list)}")
     return "\n".join(lines)
+
+
+def extract_tags(text: str) -> list:
+    """Extract @tags from task text."""
+    return re.findall(r"@(\w+)", text)
 
 
 # =============================================================================
@@ -367,17 +481,29 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Welcome to Jarvis Lite - your GTD assistant!\n\n"
-        "Just tell me what you need to do:\n"
-        "- 'Buy milk' - adds to inbox\n"
-        "- 'Call bank tomorrow' - schedules for tomorrow\n"
-        "- '#next: finish report' - adds to next actions\n"
-        "- 'Done: buy milk' or 'Done 3' - completes task\n"
-        "- 'Delete 3' - removes task\n"
-        "- 'Move 3 to next' - moves to different list\n"
-        "- 'Show inbox/next/all' - view tasks\n"
-        "- 'Weekly review' - see summary\n\n"
-        "Lists: inbox, next, scheduled, someday"
+        "*Jarvis Lite* - GTD Assistant\n\n"
+        "*Add tasks:*\n"
+        "  'Buy milk' → inbox\n"
+        "  'Buy milk @errands' → with tag\n"
+        "  'Call bank tomorrow' → scheduled\n"
+        "  '#next: finish report' → next actions\n"
+        "  'someday: learn guitar' → someday\n\n"
+        "*Manage:*\n"
+        "  'Done 3' or 'Done: buy milk'\n"
+        "  'Delete 3'\n"
+        "  'Move 3 to next' or '3 to next'\n"
+        "  '3 scheduled friday'\n\n"
+        "*Today's focus (3-5 tasks):*\n"
+        "  'Today 3' or 'Focus 3' → mark for today\n"
+        "  'Clear today' → reset today list\n\n"
+        "*View:*\n"
+        "  'Show inbox/next/today/all'\n"
+        "  'Show @work' → filter by tag\n"
+        "  'Weekly review'\n\n"
+        "*Process inbox:*\n"
+        "  'Process' → guided inbox triage\n\n"
+        "_Lists: inbox, next, scheduled, someday_",
+        parse_mode="Markdown"
     )
 
 
@@ -439,27 +565,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "move":
             task_id = parsed.get("task_id")
             new_list = parsed.get("list")
+            due_date = parsed.get("due_date")
             if not task_id or not new_list:
                 await update.message.reply_text("Please specify task ID and target list (e.g., 'Move 3 to next')")
                 return
             if new_list not in VALID_LISTS:
                 await update.message.reply_text(f"Invalid list. Use: {', '.join(VALID_LISTS)}")
                 return
-            task = move_task(user_id, task_id, new_list)
+            task = move_task(user_id, task_id, new_list, due_date)
             if task:
-                await update.message.reply_text(f"Moved [{task['id']}] {task['text']} to #{new_list}")
+                due_info = f" (due: {task['due_date']})" if task.get("due_date") else ""
+                await update.message.reply_text(f"Moved [{task['id']}] {task['text']} to #{new_list}{due_info}")
             else:
                 await update.message.reply_text("Task not found")
 
+        elif action == "today":
+            task_id = parsed.get("task_id")
+            if not task_id:
+                await update.message.reply_text("Please specify a task ID (e.g., 'Today 3')")
+                return
+            task = mark_today(user_id, task_id, True)
+            if task:
+                await update.message.reply_text(f"★ Marked for today: [{task['id']}] {task['text']}")
+            else:
+                await update.message.reply_text("Task not found")
+
+        elif action == "clear_today":
+            count = clear_today(user_id)
+            await update.message.reply_text(f"Cleared {count} task(s) from today's focus")
+
+        elif action == "process":
+            # Show inbox items for processing
+            inbox_tasks = get_tasks(user_id, "inbox")
+            if not inbox_tasks:
+                await update.message.reply_text("Inbox is empty! Nothing to process.")
+                return
+
+            lines = ["*PROCESS INBOX*\n"]
+            for task in inbox_tasks[:10]:  # Show first 10
+                lines.append(f"[{task['id']}] {task['text']}")
+
+            if len(inbox_tasks) > 10:
+                lines.append(f"\n_...and {len(inbox_tasks) - 10} more_")
+
+            lines.append("\n*For each item, reply:*")
+            lines.append("  '3 to next' → move to #next")
+            lines.append("  '3 scheduled monday' → schedule")
+            lines.append("  '3 someday' → move to someday")
+            lines.append("  'Done 3' → complete")
+            lines.append("  'Delete 3' → remove")
+            lines.append("  'Today 3' → mark for today")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
         elif action == "show":
             list_name = parsed.get("list")
-            if list_name and list_name in VALID_LISTS:
+            tag = parsed.get("tag")
+
+            if tag:
+                # Filter by tag
+                tasks = get_tasks_by_tag(user_id, tag)
+                title = f"@{tag}"
+                response = format_task_list(tasks, title, show_list=True)
+            elif list_name == "today":
+                # Show today's focus
+                tasks = get_today_tasks(user_id)
+                title = "TODAY'S FOCUS"
+                response = format_task_list(tasks, title, show_list=True)
+            elif list_name and list_name in VALID_LISTS:
                 tasks = get_tasks(user_id, list_name)
                 title = f"#{list_name.upper()}"
                 response = format_task_list(tasks, title, show_list=False)
             else:
                 # Show all lists
                 response_parts = []
+
+                # Today's focus first
+                today_tasks = get_today_tasks(user_id)
+                if today_tasks:
+                    response_parts.append(format_task_list(today_tasks, "★ TODAY'S FOCUS", show_list=True))
+
                 for lst in VALID_LISTS:
                     tasks = get_tasks(user_id, lst)
                     response_parts.append(format_task_list(tasks, f"#{lst.upper()}", show_list=False))
@@ -474,22 +659,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             overdue = get_overdue_tasks(user_id)
 
             lines = ["*WEEKLY REVIEW*\n"]
+
+            # Task counts
             lines.append("*Task Counts:*")
+            lines.append(f"  ★ today: {counts['today']}")
             for lst in VALID_LISTS:
                 lines.append(f"  #{lst}: {counts[lst]}")
 
             lines.append(f"\n*Completed this week:* {len(completed)}")
 
+            # Overdue
             if overdue:
                 lines.append(f"\n*Overdue ({len(overdue)}):*")
                 for task in overdue[:5]:
                     lines.append(f"  {format_task(task)}")
 
+            # Someday review prompt
+            someday_tasks = get_tasks(user_id, "someday")
+            if someday_tasks:
+                lines.append(f"\n*Someday/Maybe ({len(someday_tasks)}):*")
+                for task in someday_tasks[:3]:
+                    lines.append(f"  {format_task(task)}")
+                if len(someday_tasks) > 3:
+                    lines.append(f"  _...and {len(someday_tasks) - 3} more_")
+                lines.append("\n_Review: promote, schedule, or delete?_")
+
             # Suggestions
+            suggestions = []
             if counts["inbox"] > 5:
-                lines.append("\nConsider processing your inbox")
+                suggestions.append("Process your inbox")
             if counts["next"] == 0 and counts["inbox"] > 0:
-                lines.append("\nMove some inbox items to #next")
+                suggestions.append("Move some inbox items to #next")
+            if counts["today"] == 0 and counts["next"] > 0:
+                suggestions.append("Pick 3-5 tasks for today's focus")
+            if overdue:
+                suggestions.append("Reschedule or complete overdue items")
+
+            if suggestions:
+                lines.append("\n*Suggestions:*")
+                for s in suggestions:
+                    lines.append(f"  • {s}")
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -501,7 +710,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task = add_task(user_id=user_id, text=message_text, list_name="inbox")
             await update.message.reply_text(
                 f"Added [{task['id']}] {task['text']} to #inbox\n"
-                f"(Didn't understand the command? This was added as a task)"
+                f"_(Tip: say 'help' for commands)_",
+                parse_mode="Markdown"
             )
 
     except Exception as e:
@@ -518,46 +728,60 @@ async def send_daily_digest(app: Application):
     try:
         user_id = ALLOWED_USER_ID
 
-        # Get today's scheduled tasks
+        # Get today's focus tasks
+        today_tasks = get_today_tasks(user_id)
+
+        # Get scheduled tasks due today
         due_today = get_tasks_due_today(user_id)
 
         # Get overdue tasks
         overdue = get_overdue_tasks(user_id)
 
-        # Get top 3 next actions
-        next_tasks = get_tasks(user_id, "next")[:3]
+        # Get top next actions (not already marked for today)
+        next_tasks = [t for t in get_tasks(user_id, "next") if not t.get("is_today")][:3]
 
         # Get inbox count
         inbox_count = len(get_tasks(user_id, "inbox"))
 
-        lines = ["*DAILY DIGEST*\n"]
+        lines = ["*MORNING DIGEST*\n"]
+
+        # Today's focus (carried over)
+        if today_tasks:
+            lines.append(f"*★ Today's Focus ({len(today_tasks)}):*")
+            for task in today_tasks:
+                lines.append(f"  [{task['id']}] {task['text']}")
+            lines.append("")
 
         # Overdue
         if overdue:
-            lines.append(f"*Overdue ({len(overdue)}):*")
-            for task in overdue:
+            lines.append(f"*⚠️ Overdue ({len(overdue)}):*")
+            for task in overdue[:5]:
                 lines.append(f"  {format_task(task)}")
             lines.append("")
 
         # Due today
         if due_today:
-            lines.append(f"*Due Today ({len(due_today)}):*")
+            lines.append(f"*📅 Due Today ({len(due_today)}):*")
             for task in due_today:
-                lines.append(f"  {format_task(task)}")
+                lines.append(f"  [{task['id']}] {task['text']}")
             lines.append("")
 
-        # Next actions
+        # Suggested next actions
         if next_tasks:
-            lines.append(f"*Next Actions (top 3):*")
+            lines.append(f"*Suggested from #next:*")
             for task in next_tasks:
-                lines.append(f"  {format_task(task)}")
+                lines.append(f"  [{task['id']}] {task['text']}")
             lines.append("")
 
         # Inbox reminder
         if inbox_count > 0:
-            lines.append(f"Inbox: {inbox_count} items waiting")
+            lines.append(f"_📥 Inbox: {inbox_count} items waiting_")
 
-        if len(lines) > 1:  # More than just the header
+        # Morning prompt
+        if not today_tasks and (due_today or next_tasks):
+            lines.append("\n_Reply 'Today X' to mark tasks for today_")
+
+        if len(lines) > 1:
             await app.bot.send_message(
                 chat_id=user_id,
                 text="\n".join(lines),
@@ -565,10 +789,9 @@ async def send_daily_digest(app: Application):
             )
             logger.info("Daily digest sent")
         else:
-            # Nothing to report
             await app.bot.send_message(
                 chat_id=user_id,
-                text="*DAILY DIGEST*\n\nNo tasks due today. Have a great day!",
+                text="*MORNING DIGEST*\n\nNo tasks lined up. Enjoy your day!",
                 parse_mode="Markdown"
             )
 
