@@ -803,20 +803,8 @@ async def send_daily_digest(app: Application):
 # Main
 # =============================================================================
 
-def main():
-    """Start the bot."""
-    # Initialize database
-    init_db()
-
-    # Create application
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # Add handlers
-    app.add_handler(CommandHandler("start", handle_start))
-    app.add_handler(CommandHandler("help", handle_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Set up scheduler for daily digest at 7am Israel time
+async def post_init(app: Application):
+    """Called after the Application is initialized and event loop is running."""
     scheduler = AsyncIOScheduler(timezone=ISRAEL_TZ)
     scheduler.add_job(
         send_daily_digest,
@@ -827,6 +815,20 @@ def main():
     )
     scheduler.start()
     logger.info("Scheduler started - daily digest at 7:00 AM Israel time")
+
+
+def main():
+    """Start the bot."""
+    # Initialize database
+    init_db()
+
+    # Create application with post_init hook for scheduler
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+
+    # Add handlers
+    app.add_handler(CommandHandler("start", handle_start))
+    app.add_handler(CommandHandler("help", handle_start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Start polling
     logger.info("Starting bot...")
