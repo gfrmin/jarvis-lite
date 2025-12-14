@@ -34,7 +34,10 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-ALLOWED_USER_IDS = {int(uid.strip()) for uid in os.environ["ALLOWED_USER_IDS"].split(",")}
+
+# Rate limits (per user)
+RATE_LIMIT_HOURLY = int(os.environ.get("RATE_LIMIT_HOURLY", "30"))
+RATE_LIMIT_DAILY = int(os.environ.get("RATE_LIMIT_DAILY", "200"))
 
 # Constants
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -51,9 +54,10 @@ def get_db_connection():
 
 
 def init_db():
-    """Initialize the database table if it doesn't exist."""
+    """Initialize the database tables if they don't exist."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Tasks table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id SERIAL PRIMARY KEY,
@@ -70,6 +74,31 @@ def init_db():
             cur.execute("""
                 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_today BOOLEAN DEFAULT FALSE
             """)
+
+            # Rate limiting table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS api_usage (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Index for efficient rate limit queries
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_api_usage_user_timestamp
+                ON api_usage (user_id, timestamp)
+            """)
+
+            # Email subscriptions table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE NOT NULL,
+                    email VARCHAR(255) NOT NULL,
+                    subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             conn.commit()
     logger.info("Database initialized")
 
@@ -331,6 +360,129 @@ def get_completed_this_week(user_id: int) -> list:
 
 
 # =============================================================================
+# Rate Limiting Functions
+# =============================================================================
+
+def record_api_usage(user_id: int):
+    """Record an API call for rate limiting."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO api_usage (user_id) VALUES (%s)",
+                (user_id,)
+            )
+            conn.commit()
+
+
+def check_rate_limit(user_id: int) -> tuple[bool, str]:
+    """
+    Check if user is within rate limits.
+    Returns (is_allowed, message).
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            now = datetime.now()
+            hour_ago = now - timedelta(hours=1)
+            day_ago = now - timedelta(days=1)
+
+            # Check hourly limit
+            cur.execute(
+                """
+                SELECT COUNT(*) as count FROM api_usage
+                WHERE user_id = %s AND timestamp > %s
+                """,
+                (user_id, hour_ago)
+            )
+            hourly_count = cur.fetchone()["count"]
+
+            if hourly_count >= RATE_LIMIT_HOURLY:
+                return False, f"Rate limit reached ({RATE_LIMIT_HOURLY}/hour). Please try again later."
+
+            # Check daily limit
+            cur.execute(
+                """
+                SELECT COUNT(*) as count FROM api_usage
+                WHERE user_id = %s AND timestamp > %s
+                """,
+                (user_id, day_ago)
+            )
+            daily_count = cur.fetchone()["count"]
+
+            if daily_count >= RATE_LIMIT_DAILY:
+                return False, f"Daily limit reached ({RATE_LIMIT_DAILY}/day). Please try again tomorrow."
+
+            return True, ""
+
+
+def cleanup_old_usage():
+    """Clean up API usage records older than 24 hours."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            day_ago = datetime.now() - timedelta(days=1)
+            cur.execute(
+                "DELETE FROM api_usage WHERE timestamp < %s",
+                (day_ago,)
+            )
+            conn.commit()
+
+
+# =============================================================================
+# Subscription Functions
+# =============================================================================
+
+def subscribe_email(user_id: int, email: str) -> tuple[bool, str]:
+    """
+    Subscribe a user's email address.
+    Returns (success, message).
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO subscriptions (user_id, email)
+                    VALUES (%s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET email = %s, subscribed_at = NOW()
+                    """,
+                    (user_id, email, email)
+                )
+                conn.commit()
+                return True, "Subscribed successfully!"
+            except Exception as e:
+                logger.error(f"Error subscribing email: {e}")
+                return False, "Failed to subscribe. Please try again."
+
+
+def get_subscription(user_id: int) -> dict | None:
+    """Get subscription info for a user."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM subscriptions WHERE user_id = %s",
+                (user_id,)
+            )
+            return cur.fetchone()
+
+
+def get_all_subscribers() -> list:
+    """Get all subscribed users."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM subscriptions ORDER BY subscribed_at")
+            return cur.fetchall()
+
+
+def get_all_active_users() -> list:
+    """Get all users who have tasks (for daily digest)."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT user_id FROM tasks WHERE completed_at IS NULL"
+            )
+            return [row["user_id"] for row in cur.fetchall()]
+
+
+# =============================================================================
 # Claude Haiku Parsing
 # =============================================================================
 
@@ -470,16 +622,14 @@ def extract_tags(text: str) -> list:
 # Telegram Handlers
 # =============================================================================
 
-def is_authorized(user_id: int) -> bool:
-    """Check if user is authorized."""
-    return user_id in ALLOWED_USER_IDS
+def is_valid_email(email: str) -> bool:
+    """Basic email validation."""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
-    if not is_authorized(update.effective_user.id):
-        return
-
     await update.message.reply_text(
         "*Jarvis Lite* - GTD Assistant\n\n"
         "*Add tasks:*\n"
@@ -507,19 +657,58 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def handle_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /subscribe command - capture email for updates."""
+    user_id = update.effective_user.id
+    args = context.args
+
+    # Check if user is already subscribed
+    existing = get_subscription(user_id)
+
+    if not args:
+        if existing:
+            await update.message.reply_text(
+                f"You're subscribed with: {existing['email']}\n\n"
+                "To update, use: /subscribe your@email.com"
+            )
+        else:
+            await update.message.reply_text(
+                "Subscribe to receive updates about Jarvis Lite!\n\n"
+                "Usage: /subscribe your@email.com"
+            )
+        return
+
+    email = args[0].strip()
+
+    if not is_valid_email(email):
+        await update.message.reply_text(
+            "Invalid email format. Please try again.\n\n"
+            "Usage: /subscribe your@email.com"
+        )
+        return
+
+    success, message = subscribe_email(user_id, email)
+    if success:
+        await update.message.reply_text(f"Thanks! You're now subscribed with: {email}")
+    else:
+        await update.message.reply_text(message)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages - the main bot logic."""
     user_id = update.effective_user.id
-
-    if not is_authorized(user_id):
-        logger.warning(f"Unauthorized access attempt from user {user_id}")
-        return
-
     message_text = update.message.text.strip()
     if not message_text:
         return
 
-    # Parse with Haiku
+    # Check rate limits before API call
+    is_allowed, rate_msg = check_rate_limit(user_id)
+    if not is_allowed:
+        await update.message.reply_text(rate_msg)
+        return
+
+    # Record API usage and parse with Haiku
+    record_api_usage(user_id)
     parsed = parse_with_haiku(message_text)
     action = parsed.get("action", "unknown")
 
@@ -724,8 +913,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================================================================
 
 async def send_daily_digest(app: Application):
-    """Send the daily digest at 7am Israel time."""
-    for user_id in ALLOWED_USER_IDS:
+    """Send the daily digest at 7am Israel time to all active users."""
+    # Clean up old API usage records
+    cleanup_old_usage()
+
+    for user_id in get_all_active_users():
         try:
             # Get today's focus tasks
             today_tasks = get_today_tasks(user_id)
@@ -827,6 +1019,7 @@ def main():
     # Add handlers
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("help", handle_start))
+    app.add_handler(CommandHandler("subscribe", handle_subscribe))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Start polling
