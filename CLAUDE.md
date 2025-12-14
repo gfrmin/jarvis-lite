@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Jarvis Lite is a single-user GTD (Getting Things Done) task management Telegram bot. It uses Claude Haiku for natural language parsing, PostgreSQL for storage, and APScheduler for daily digests.
+Jarvis Lite is a multi-user GTD (Getting Things Done) task management Telegram bot. It uses Claude Haiku for natural language parsing, PostgreSQL for storage, and APScheduler for daily digests. Open to all users with per-user rate limiting to protect API costs.
 
 ## Commands
 
@@ -23,17 +23,27 @@ uv sync
 Required environment variables (set in `.env` for local dev, or in Render dashboard):
 - `TELEGRAM_TOKEN` - Telegram bot token from BotFather
 - `ANTHROPIC_API_KEY` - Anthropic API key
-- `ALLOWED_USER_IDS` - Comma-separated list of authorized Telegram user IDs
 - `DATABASE_URL` - PostgreSQL connection string
+
+Optional environment variables:
+- `RATE_LIMIT_HOURLY` - Max API calls per user per hour (default: 30)
+- `RATE_LIMIT_DAILY` - Max API calls per user per day (default: 200)
 
 ## Architecture
 
 Single-file bot (`bot.py`) with these sections:
-- **Database Functions** (lines 44-330): psycopg2 direct queries, no ORM
-- **Claude Haiku Parsing** (lines 333-432): NLP intent detection returning structured JSON actions
-- **Message Formatting** (lines 436-466): Task display helpers
-- **Telegram Handlers** (lines 469-719): Command and message routing
-- **Daily Digest** (lines 722-796): 7am Israel time scheduled summary
+- **Database Functions**: psycopg2 direct queries, no ORM
+- **Rate Limiting Functions**: Per-user hourly/daily API usage tracking
+- **Subscription Functions**: Email capture for updates
+- **Claude Haiku Parsing**: NLP intent detection returning structured JSON actions
+- **Message Formatting**: Task display helpers
+- **Telegram Handlers**: Command and message routing (/start, /help, /subscribe)
+- **Daily Digest**: 7am Israel time scheduled summary for all active users
+
+Database tables:
+- `tasks` - User tasks with GTD metadata
+- `api_usage` - Rate limiting tracker (auto-cleaned daily)
+- `subscriptions` - Email subscriptions for updates
 
 ## GTD Model
 
