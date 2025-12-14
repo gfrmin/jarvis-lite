@@ -20,7 +20,7 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: ALLOWED_USER_ID
+      - key: ALLOWED_USER_IDS
         sync: false
       - key: PYTHON_VERSION
         value: "3.11.4"

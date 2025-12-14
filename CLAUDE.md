@@ -23,7 +23,7 @@ uv sync
 Required environment variables (set in `.env` for local dev, or in Render dashboard):
 - `TELEGRAM_TOKEN` - Telegram bot token from BotFather
 - `ANTHROPIC_API_KEY` - Anthropic API key
-- `ALLOWED_USER_ID` - Single authorized Telegram user ID
+- `ALLOWED_USER_IDS` - Comma-separated list of authorized Telegram user IDs
 - `DATABASE_URL` - PostgreSQL connection string
 
 ## Architecture
