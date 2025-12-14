@@ -22,7 +22,7 @@ Personal task management bot using GTD principles.
    - Set the environment variables when prompted:
      - `TELEGRAM_TOKEN` - from BotFather
      - `ANTHROPIC_API_KEY` - from [Anthropic Console](https://console.anthropic.com)
-     - `ALLOWED_USER_ID` - your Telegram user ID
+     - `ALLOWED_USER_IDS` - comma-separated Telegram user IDs
 
 4. **Start chatting with your bot!**
 

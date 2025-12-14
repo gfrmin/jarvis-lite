@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 os.environ.setdefault("TELEGRAM_TOKEN", "test_token")
 os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost/test")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test_key")
-os.environ.setdefault("ALLOWED_USER_ID", "123456")
+os.environ.setdefault("ALLOWED_USER_IDS", "123456")
 
 
 VALID_MODEL_PREFIXES = (

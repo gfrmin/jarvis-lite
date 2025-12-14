@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-ALLOWED_USER_ID = int(os.environ["ALLOWED_USER_ID"])
+ALLOWED_USER_IDS = {int(uid.strip()) for uid in os.environ["ALLOWED_USER_IDS"].split(",")}
 
 # Constants
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -472,7 +472,7 @@ def extract_tags(text: str) -> list:
 
 def is_authorized(user_id: int) -> bool:
     """Check if user is authorized."""
-    return user_id == ALLOWED_USER_ID
+    return user_id in ALLOWED_USER_IDS
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -725,78 +725,77 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_daily_digest(app: Application):
     """Send the daily digest at 7am Israel time."""
-    try:
-        user_id = ALLOWED_USER_ID
+    for user_id in ALLOWED_USER_IDS:
+        try:
+            # Get today's focus tasks
+            today_tasks = get_today_tasks(user_id)
 
-        # Get today's focus tasks
-        today_tasks = get_today_tasks(user_id)
+            # Get scheduled tasks due today
+            due_today = get_tasks_due_today(user_id)
 
-        # Get scheduled tasks due today
-        due_today = get_tasks_due_today(user_id)
+            # Get overdue tasks
+            overdue = get_overdue_tasks(user_id)
 
-        # Get overdue tasks
-        overdue = get_overdue_tasks(user_id)
+            # Get top next actions (not already marked for today)
+            next_tasks = [t for t in get_tasks(user_id, "next") if not t.get("is_today")][:3]
 
-        # Get top next actions (not already marked for today)
-        next_tasks = [t for t in get_tasks(user_id, "next") if not t.get("is_today")][:3]
+            # Get inbox count
+            inbox_count = len(get_tasks(user_id, "inbox"))
 
-        # Get inbox count
-        inbox_count = len(get_tasks(user_id, "inbox"))
+            lines = ["*MORNING DIGEST*\n"]
 
-        lines = ["*MORNING DIGEST*\n"]
+            # Today's focus (carried over)
+            if today_tasks:
+                lines.append(f"*★ Today's Focus ({len(today_tasks)}):*")
+                for task in today_tasks:
+                    lines.append(f"  [{task['id']}] {task['text']}")
+                lines.append("")
 
-        # Today's focus (carried over)
-        if today_tasks:
-            lines.append(f"*★ Today's Focus ({len(today_tasks)}):*")
-            for task in today_tasks:
-                lines.append(f"  [{task['id']}] {task['text']}")
-            lines.append("")
+            # Overdue
+            if overdue:
+                lines.append(f"*⚠️ Overdue ({len(overdue)}):*")
+                for task in overdue[:5]:
+                    lines.append(f"  {format_task(task)}")
+                lines.append("")
 
-        # Overdue
-        if overdue:
-            lines.append(f"*⚠️ Overdue ({len(overdue)}):*")
-            for task in overdue[:5]:
-                lines.append(f"  {format_task(task)}")
-            lines.append("")
+            # Due today
+            if due_today:
+                lines.append(f"*📅 Due Today ({len(due_today)}):*")
+                for task in due_today:
+                    lines.append(f"  [{task['id']}] {task['text']}")
+                lines.append("")
 
-        # Due today
-        if due_today:
-            lines.append(f"*📅 Due Today ({len(due_today)}):*")
-            for task in due_today:
-                lines.append(f"  [{task['id']}] {task['text']}")
-            lines.append("")
+            # Suggested next actions
+            if next_tasks:
+                lines.append(f"*Suggested from #next:*")
+                for task in next_tasks:
+                    lines.append(f"  [{task['id']}] {task['text']}")
+                lines.append("")
 
-        # Suggested next actions
-        if next_tasks:
-            lines.append(f"*Suggested from #next:*")
-            for task in next_tasks:
-                lines.append(f"  [{task['id']}] {task['text']}")
-            lines.append("")
+            # Inbox reminder
+            if inbox_count > 0:
+                lines.append(f"_📥 Inbox: {inbox_count} items waiting_")
 
-        # Inbox reminder
-        if inbox_count > 0:
-            lines.append(f"_📥 Inbox: {inbox_count} items waiting_")
+            # Morning prompt
+            if not today_tasks and (due_today or next_tasks):
+                lines.append("\n_Reply 'Today X' to mark tasks for today_")
 
-        # Morning prompt
-        if not today_tasks and (due_today or next_tasks):
-            lines.append("\n_Reply 'Today X' to mark tasks for today_")
+            if len(lines) > 1:
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text="\n".join(lines),
+                    parse_mode="Markdown"
+                )
+                logger.info(f"Daily digest sent to user {user_id}")
+            else:
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text="*MORNING DIGEST*\n\nNo tasks lined up. Enjoy your day!",
+                    parse_mode="Markdown"
+                )
 
-        if len(lines) > 1:
-            await app.bot.send_message(
-                chat_id=user_id,
-                text="\n".join(lines),
-                parse_mode="Markdown"
-            )
-            logger.info("Daily digest sent")
-        else:
-            await app.bot.send_message(
-                chat_id=user_id,
-                text="*MORNING DIGEST*\n\nNo tasks lined up. Enjoy your day!",
-                parse_mode="Markdown"
-            )
-
-    except Exception as e:
-        logger.error(f"Error sending daily digest: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error sending daily digest to user {user_id}: {e}", exc_info=True)
 
 
 # =============================================================================
