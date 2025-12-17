@@ -580,6 +580,59 @@ def get_admin_usage_stats() -> list:
             return cur.fetchall()
 
 
+def parse_admin_query(query: str) -> dict:
+    """
+    Use Claude Haiku to parse natural language admin queries.
+
+    Returns a dict with:
+    - action: stats | users | usage | emails | help | unknown
+    """
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    system_prompt = """You are an admin query parser for a Telegram bot. Parse the admin's question into a JSON action.
+
+Actions:
+- stats: General overview/dashboard. Questions about totals, counts, how many users, how many tasks, general health.
+- users: User-specific info. Questions about user list, who's using it, user activity, task counts per user.
+- usage: API usage info. Questions about API calls, rate limits, who's using the API most, usage patterns.
+- emails: Subscriber info. Questions about email list, subscribers, who subscribed.
+- help: User wants to know what admin commands are available.
+
+Respond with ONLY valid JSON, no other text:
+{"action": "stats|users|usage|emails|help|unknown"}
+
+Examples:
+- "how many users?" -> {"action": "stats"}
+- "show me the dashboard" -> {"action": "stats"}
+- "who's using the bot?" -> {"action": "users"}
+- "list all users" -> {"action": "users"}
+- "user activity" -> {"action": "users"}
+- "API usage" -> {"action": "usage"}
+- "who's hitting rate limits?" -> {"action": "usage"}
+- "show subscribers" -> {"action": "emails"}
+- "email list" -> {"action": "emails"}
+- "what can I do?" -> {"action": "help"}
+- "help" -> {"action": "help"}"""
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=64,
+        system=system_prompt,
+        messages=[{"role": "user", "content": query}]
+    )
+
+    response_text = response.content[0].text.strip()
+
+    try:
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1])
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse admin query response: {response_text}")
+        return {"action": "unknown"}
+
+
 # =============================================================================
 # Claude Haiku Parsing
 # =============================================================================
@@ -793,7 +846,7 @@ async def handle_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin command - admin-only database queries."""
+    """Handle /admin command - admin-only database queries with natural language support."""
     user_id = update.effective_user.id
 
     # Check if user is admin
@@ -802,10 +855,24 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
-    subcommand = args[0].lower() if args else "stats"
+    query = " ".join(args) if args else ""
+
+    # Check for explicit commands first, otherwise use natural language
+    explicit_commands = ["stats", "users", "usage", "emails", "subscribers", "help"]
+    if query.lower() in explicit_commands:
+        action = query.lower()
+        if action == "subscribers":
+            action = "emails"
+    elif query:
+        # Use natural language parsing
+        parsed = parse_admin_query(query)
+        action = parsed.get("action", "stats")
+        logger.info(f"Admin query '{query}' parsed to action: {action}")
+    else:
+        action = "stats"
 
     try:
-        if subcommand == "stats":
+        if action == "stats":
             stats = get_admin_stats()
             lines = [
                 "*ADMIN DASHBOARD*\n",
@@ -824,11 +891,11 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "",
                 f"*Subscribers:* {stats['subscribers']}",
                 "",
-                "_Commands: /admin stats | users | usage | emails_"
+                "_Try: /admin how many users? | who's active? | show emails_"
             ]
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-        elif subcommand == "users":
+        elif action == "users":
             users = get_admin_users_info()
             if not users:
                 await update.message.reply_text("No users found.")
@@ -849,7 +916,7 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-        elif subcommand == "usage":
+        elif action == "usage":
             usage = get_admin_usage_stats()
             if not usage:
                 await update.message.reply_text("No API usage in the last 24 hours.")
@@ -868,7 +935,7 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-        elif subcommand == "emails" or subcommand == "subscribers":
+        elif action == "emails":
             subscribers = get_all_subscribers()
             if not subscribers:
                 await update.message.reply_text("No subscribers yet.")
@@ -881,13 +948,17 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-        else:
+        else:  # help or unknown
             await update.message.reply_text(
                 "*Admin Commands:*\n"
-                "  /admin stats - Overview dashboard\n"
-                "  /admin users - User list with task counts\n"
-                "  /admin usage - API usage per user (24h)\n"
-                "  /admin emails - Subscriber list",
+                "  /admin - Overview dashboard\n"
+                "  /admin users - User list\n"
+                "  /admin usage - API usage (24h)\n"
+                "  /admin emails - Subscribers\n\n"
+                "_Or ask naturally:_\n"
+                "  /admin how many users?\n"
+                "  /admin who's most active?\n"
+                "  /admin show me the email list",
                 parse_mode="Markdown"
             )
 
