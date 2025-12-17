@@ -1,6 +1,6 @@
 # Jarvis Lite - GTD Telegram Bot
 
-Personal task management bot using GTD principles.
+Multi-user task management bot using GTD principles. Uses Claude Haiku for natural language parsing, PostgreSQL for storage, and includes per-user rate limiting.
 
 ## Quick Deploy to Render
 
@@ -22,7 +22,10 @@ Personal task management bot using GTD principles.
    - Set the environment variables when prompted:
      - `TELEGRAM_TOKEN` - from BotFather
      - `ANTHROPIC_API_KEY` - from [Anthropic Console](https://console.anthropic.com)
-     - `ALLOWED_USER_IDS` - comma-separated Telegram user IDs
+   - Optional environment variables:
+     - `RATE_LIMIT_HOURLY` - Max API calls per user per hour (default: 30)
+     - `RATE_LIMIT_DAILY` - Max API calls per user per day (default: 200)
+     - `ADMIN_USER_ID` - Your Telegram user ID (enables /admin command)
 
 4. **Start chatting with your bot!**
 
@@ -33,5 +36,10 @@ Just message your bot naturally:
 - "Call dentist next week @errands"
 - "Show my tasks"
 - "What's due today?"
-- `/today` - see today's focus
-- `/review` - weekly review
+
+### Commands
+- `/start` - Get started and see help
+- `/today` - See today's focus tasks
+- `/review` - Weekly review
+- `/subscribe your@email.com` - Subscribe to updates
+- `/admin` - Admin dashboard (requires ADMIN_USER_ID)
