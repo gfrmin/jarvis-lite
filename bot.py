@@ -39,6 +39,11 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 RATE_LIMIT_HOURLY = int(os.environ.get("RATE_LIMIT_HOURLY", "30"))
 RATE_LIMIT_DAILY = int(os.environ.get("RATE_LIMIT_DAILY", "200"))
 
+# Admin user ID (optional - enables /admin command)
+ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID")
+if ADMIN_USER_ID:
+    ADMIN_USER_ID = int(ADMIN_USER_ID)
+
 # Constants
 ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 VALID_LISTS = ["inbox", "next", "scheduled", "someday"]
@@ -483,6 +488,99 @@ def get_all_active_users() -> list:
 
 
 # =============================================================================
+# Admin Functions
+# =============================================================================
+
+def get_admin_stats() -> dict:
+    """Get overall statistics for admin dashboard."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Total unique users
+            cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM tasks")
+            total_users = cur.fetchone()["count"]
+
+            # Active users (with incomplete tasks)
+            cur.execute("SELECT COUNT(DISTINCT user_id) as count FROM tasks WHERE completed_at IS NULL")
+            active_users = cur.fetchone()["count"]
+
+            # Total tasks
+            cur.execute("SELECT COUNT(*) as count FROM tasks")
+            total_tasks = cur.fetchone()["count"]
+
+            # Incomplete tasks
+            cur.execute("SELECT COUNT(*) as count FROM tasks WHERE completed_at IS NULL")
+            incomplete_tasks = cur.fetchone()["count"]
+
+            # Completed tasks
+            cur.execute("SELECT COUNT(*) as count FROM tasks WHERE completed_at IS NOT NULL")
+            completed_tasks = cur.fetchone()["count"]
+
+            # API calls today
+            cur.execute(
+                "SELECT COUNT(*) as count FROM api_usage WHERE timestamp > NOW() - INTERVAL '1 day'"
+            )
+            api_calls_today = cur.fetchone()["count"]
+
+            # API calls this hour
+            cur.execute(
+                "SELECT COUNT(*) as count FROM api_usage WHERE timestamp > NOW() - INTERVAL '1 hour'"
+            )
+            api_calls_hour = cur.fetchone()["count"]
+
+            # Subscribers count
+            cur.execute("SELECT COUNT(*) as count FROM subscriptions")
+            subscribers = cur.fetchone()["count"]
+
+            return {
+                "total_users": total_users,
+                "active_users": active_users,
+                "total_tasks": total_tasks,
+                "incomplete_tasks": incomplete_tasks,
+                "completed_tasks": completed_tasks,
+                "api_calls_today": api_calls_today,
+                "api_calls_hour": api_calls_hour,
+                "subscribers": subscribers,
+            }
+
+
+def get_admin_users_info() -> list:
+    """Get detailed user information for admin."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    user_id,
+                    COUNT(*) FILTER (WHERE completed_at IS NULL) as active_tasks,
+                    COUNT(*) FILTER (WHERE completed_at IS NOT NULL) as completed_tasks,
+                    COUNT(*) as total_tasks,
+                    MIN(created_at) as first_task,
+                    MAX(created_at) as last_task
+                FROM tasks
+                GROUP BY user_id
+                ORDER BY last_task DESC
+            """)
+            return cur.fetchall()
+
+
+def get_admin_usage_stats() -> list:
+    """Get API usage statistics per user for last 24 hours."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    user_id,
+                    COUNT(*) as calls_24h,
+                    COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '1 hour') as calls_1h,
+                    MAX(timestamp) as last_call
+                FROM api_usage
+                WHERE timestamp > NOW() - INTERVAL '1 day'
+                GROUP BY user_id
+                ORDER BY calls_24h DESC
+            """)
+            return cur.fetchall()
+
+
+# =============================================================================
 # Claude Haiku Parsing
 # =============================================================================
 
@@ -692,6 +790,110 @@ async def handle_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Thanks! You're now subscribed with: {email}")
     else:
         await update.message.reply_text(message)
+
+
+async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin command - admin-only database queries."""
+    user_id = update.effective_user.id
+
+    # Check if user is admin
+    if not ADMIN_USER_ID or user_id != ADMIN_USER_ID:
+        await update.message.reply_text("This command is only available to the bot administrator.")
+        return
+
+    args = context.args
+    subcommand = args[0].lower() if args else "stats"
+
+    try:
+        if subcommand == "stats":
+            stats = get_admin_stats()
+            lines = [
+                "*ADMIN DASHBOARD*\n",
+                "*Users:*",
+                f"  Total: {stats['total_users']}",
+                f"  Active: {stats['active_users']}",
+                "",
+                "*Tasks:*",
+                f"  Total: {stats['total_tasks']}",
+                f"  Active: {stats['incomplete_tasks']}",
+                f"  Completed: {stats['completed_tasks']}",
+                "",
+                "*API Usage:*",
+                f"  Last hour: {stats['api_calls_hour']}",
+                f"  Last 24h: {stats['api_calls_today']}",
+                "",
+                f"*Subscribers:* {stats['subscribers']}",
+                "",
+                "_Commands: /admin stats | users | usage | emails_"
+            ]
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        elif subcommand == "users":
+            users = get_admin_users_info()
+            if not users:
+                await update.message.reply_text("No users found.")
+                return
+
+            lines = ["*USER LIST*\n"]
+            for u in users[:20]:  # Limit to 20 users
+                first_date = u["first_task"].strftime("%Y-%m-%d") if u["first_task"] else "N/A"
+                last_date = u["last_task"].strftime("%Y-%m-%d") if u["last_task"] else "N/A"
+                lines.append(
+                    f"ID `{u['user_id']}`\n"
+                    f"  Tasks: {u['active_tasks']} active / {u['completed_tasks']} done\n"
+                    f"  First: {first_date} | Last: {last_date}"
+                )
+
+            if len(users) > 20:
+                lines.append(f"\n_...and {len(users) - 20} more users_")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        elif subcommand == "usage":
+            usage = get_admin_usage_stats()
+            if not usage:
+                await update.message.reply_text("No API usage in the last 24 hours.")
+                return
+
+            lines = ["*API USAGE (24h)*\n"]
+            for u in usage[:20]:  # Limit to 20
+                last_call = u["last_call"].strftime("%H:%M") if u["last_call"] else "N/A"
+                lines.append(
+                    f"ID `{u['user_id']}`: {u['calls_24h']} calls "
+                    f"({u['calls_1h']} in last hour) - last: {last_call}"
+                )
+
+            if len(usage) > 20:
+                lines.append(f"\n_...and {len(usage) - 20} more users_")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        elif subcommand == "emails" or subcommand == "subscribers":
+            subscribers = get_all_subscribers()
+            if not subscribers:
+                await update.message.reply_text("No subscribers yet.")
+                return
+
+            lines = ["*SUBSCRIBERS*\n"]
+            for s in subscribers:
+                sub_date = s["subscribed_at"].strftime("%Y-%m-%d") if s["subscribed_at"] else "N/A"
+                lines.append(f"• `{s['user_id']}`: {s['email']} ({sub_date})")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        else:
+            await update.message.reply_text(
+                "*Admin Commands:*\n"
+                "  /admin stats - Overview dashboard\n"
+                "  /admin users - User list with task counts\n"
+                "  /admin usage - API usage per user (24h)\n"
+                "  /admin emails - Subscriber list",
+                parse_mode="Markdown"
+            )
+
+    except Exception as e:
+        logger.error(f"Admin command error: {e}", exc_info=True)
+        await update.message.reply_text(f"Error: {str(e)}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1020,6 +1222,7 @@ def main():
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("help", handle_start))
     app.add_handler(CommandHandler("subscribe", handle_subscribe))
+    app.add_handler(CommandHandler("admin", handle_admin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Start polling
