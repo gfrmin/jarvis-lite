@@ -20,7 +20,7 @@ uv sync
 
 ## Environment Variables
 
-Required environment variables (set in `.env` for local dev, or in Render dashboard):
+Required environment variables (set in shell for local dev, or in Render dashboard):
 - `TELEGRAM_TOKEN` - Telegram bot token from BotFather
 - `ANTHROPIC_API_KEY` - Anthropic API key
 - `DATABASE_URL` - PostgreSQL connection string
@@ -28,6 +28,7 @@ Required environment variables (set in `.env` for local dev, or in Render dashbo
 Optional environment variables:
 - `RATE_LIMIT_HOURLY` - Max API calls per user per hour (default: 30)
 - `RATE_LIMIT_DAILY` - Max API calls per user per day (default: 200)
+- `ADMIN_USER_ID` - Telegram user ID for admin commands (enables /admin)
 
 ## Architecture
 
@@ -35,9 +36,10 @@ Single-file bot (`bot.py`) with these sections:
 - **Database Functions**: psycopg2 direct queries, no ORM
 - **Rate Limiting Functions**: Per-user hourly/daily API usage tracking
 - **Subscription Functions**: Email capture for updates
+- **Admin Functions**: Database stats and user information queries
 - **Claude Haiku Parsing**: NLP intent detection returning structured JSON actions
 - **Message Formatting**: Task display helpers
-- **Telegram Handlers**: Command and message routing (/start, /help, /subscribe)
+- **Telegram Handlers**: Command and message routing (/start, /help, /subscribe, /admin)
 - **Daily Digest**: 7am Israel time scheduled summary for all active users
 
 Database tables:
