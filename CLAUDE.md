@@ -20,7 +20,7 @@ uv sync
 
 ## Environment Variables
 
-Required environment variables (set in `.env` for local dev, or in Render dashboard):
+Required environment variables (set in shell for local dev, or in Render dashboard):
 - `TELEGRAM_TOKEN` - Telegram bot token from BotFather
 - `ANTHROPIC_API_KEY` - Anthropic API key
 - `DATABASE_URL` - PostgreSQL connection string
