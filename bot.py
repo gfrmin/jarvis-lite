@@ -742,7 +742,8 @@ Examples:
 def format_task(task: dict, show_list: bool = False) -> str:
     """Format a single task for display."""
     star = "★ " if task.get("is_today") else ""
-    parts = [f"{star}[{task['id']}] {task['text']}"]
+    escaped_text = escape_markdown(task['text'])
+    parts = [f"{star}[{task['id']}] {escaped_text}"]
     if show_list:
         parts.append(f"#{task['list']}")
     if task.get("due_date"):
@@ -767,6 +768,16 @@ def format_task_list(tasks: list, title: str, show_list: bool = False) -> str:
 def extract_tags(text: str) -> list:
     """Extract @tags from task text."""
     return re.findall(r"@(\w+)", text)
+
+
+def escape_markdown(text: str) -> str:
+    """Escape Markdown special characters in text for safe Telegram display."""
+    # Telegram Markdown v1 special chars: _ * ` [
+    # We escape them with backslash
+    escape_chars = ['_', '*', '`', '[']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 
 # =============================================================================
@@ -1065,7 +1076,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             lines = ["*PROCESS INBOX*\n"]
             for task in inbox_tasks[:10]:  # Show first 10
-                lines.append(f"[{task['id']}] {task['text']}")
+                escaped_text = escape_markdown(task['text'])
+                lines.append(f"[{task['id']}] {escaped_text}")
 
             if len(inbox_tasks) > 10:
                 lines.append(f"\n_...and {len(inbox_tasks) - 10} more_")
@@ -1170,8 +1182,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # Unknown action - treat as a task to add to inbox
             task = add_task(user_id=user_id, text=message_text, list_name="inbox")
+            escaped_text = escape_markdown(task['text'])
             await update.message.reply_text(
-                f"Added [{task['id']}] {task['text']} to #inbox\n"
+                f"Added [{task['id']}] {escaped_text} to #inbox\n"
                 f"_(Tip: say 'help' for commands)_",
                 parse_mode="Markdown"
             )
@@ -1213,7 +1226,8 @@ async def send_daily_digest(app: Application):
             if today_tasks:
                 lines.append(f"*★ Today's Focus ({len(today_tasks)}):*")
                 for task in today_tasks:
-                    lines.append(f"  [{task['id']}] {task['text']}")
+                    escaped_text = escape_markdown(task['text'])
+                    lines.append(f"  [{task['id']}] {escaped_text}")
                 lines.append("")
 
             # Overdue
@@ -1227,14 +1241,16 @@ async def send_daily_digest(app: Application):
             if due_today:
                 lines.append(f"*📅 Due Today ({len(due_today)}):*")
                 for task in due_today:
-                    lines.append(f"  [{task['id']}] {task['text']}")
+                    escaped_text = escape_markdown(task['text'])
+                    lines.append(f"  [{task['id']}] {escaped_text}")
                 lines.append("")
 
             # Suggested next actions
             if next_tasks:
                 lines.append(f"*Suggested from #next:*")
                 for task in next_tasks:
-                    lines.append(f"  [{task['id']}] {task['text']}")
+                    escaped_text = escape_markdown(task['text'])
+                    lines.append(f"  [{task['id']}] {escaped_text}")
                 lines.append("")
 
             # Inbox reminder
