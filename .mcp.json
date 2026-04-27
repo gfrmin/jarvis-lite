@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "jarvis-gtd": {
+      "command": "uv",
+      "args": ["run", "--directory", "/home/g/git/jarvis-lite", "python", "mcp_server.py"]
+    }
+  }
+}
