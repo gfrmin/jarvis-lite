@@ -7,3 +7,4 @@ venv/
 jarvis.db
 jarvis.db-wal
 jarvis.db-shm
+.sync_token

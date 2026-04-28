@@ -3,21 +3,13 @@
 
 import json
 import os
-import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-DB_PATH = Path(__file__).parent / "jarvis.db"
+from db import get_db
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-VALID_LISTS = ("inbox", "next", "scheduled", "someday")
-
-
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
 
 
 def send_telegram(chat_id: int, text: str) -> None:
@@ -27,8 +19,9 @@ def send_telegram(chat_id: int, text: str) -> None:
     urlopen(req, timeout=10)
 
 
-def build_digest(conn: sqlite3.Connection, user_id: int) -> str | None:
+def build_digest(user_id: int) -> str | None:
     today = date.today().isoformat()
+    conn = get_db()
 
     today_tasks = conn.execute(
         "SELECT * FROM tasks WHERE user_id = ? AND is_today = 1 AND completed_at IS NULL ORDER BY id",
@@ -54,6 +47,8 @@ def build_digest(conn: sqlite3.Connection, user_id: int) -> str | None:
         "SELECT COUNT(*) as c FROM tasks WHERE user_id = ? AND list = 'inbox' AND completed_at IS NULL",
         (user_id,),
     ).fetchone()["c"]
+
+    conn.close()
 
     if not any([today_tasks, overdue, due_today, next_tasks]) and inbox_count == 0:
         return None
@@ -97,17 +92,16 @@ def main() -> None:
         "SELECT DISTINCT user_id FROM tasks WHERE completed_at IS NULL AND created_at >= ?",
         (thirty_days_ago,),
     ).fetchall()
+    conn.close()
 
     for row in users:
         user_id = row["user_id"]
-        digest = build_digest(conn, user_id)
+        digest = build_digest(user_id)
         if digest:
             try:
                 send_telegram(user_id, digest)
             except Exception as e:
                 print(f"Failed to send digest to {user_id}: {e}")
-
-    conn.close()
 
 
 if __name__ == "__main__":
